@@ -79,18 +79,19 @@ class QuerySetSubscriptionMailService {
 
         if(queryDiffEntries.size() > 0) {
             def queryDiffsMap = queryDiffEntries.groupBy { it.querySet }
+            def orderedQueryDiffsMap = queryDiffsMap.sort()*.key.query.id
 
             StringBuilder textStringBuilder = new StringBuilder()
-
             textStringBuilder.append("Generated as per day ${currentDate.format("d.' of 'MMMM Y h:mm aa z")}")
             textStringBuilder.append(NEW_LINE)
             textStringBuilder.append("List of updated query results:")
             textStringBuilder.append(NEW_LINE)
 
-            def patientSetMap = queryDiffsMap.findAll{it.key.setType == SetType.PATIENT}
+            def patientSetMap = orderedQueryDiffsMap.findAll{it.key.setType == SetType.PATIENT}
             if(patientSetMap.size() == 0) {
                 return null
             }
+            int i = 0
             for (entry in patientSetMap) {
                 def addedIds = entry.value.findAll {
                     it.changeFlag == ChangeFlag.ADDED
@@ -98,15 +99,19 @@ class QuerySetSubscriptionMailService {
                 def removedIds = entry.value.findAll {
                     it.changeFlag == ChangeFlag.REMOVED
                 }?.objectId
-                textStringBuilder.append(NEW_LINE)
-                textStringBuilder.append("For a query named: '$entry.key.query.name' (id='$entry.key.query.id') \n" +
-                        "date of the change: $entry.key.createDate \n")
+
+                if(i == 0 || entry.key.query.id == patientSetMap.get(i-1).key.query.id) {
+                    textStringBuilder.append(NEW_LINE)
+                    textStringBuilder.append("For a query named: '$entry.key.query.name' (id='$entry.key.query.id') \n")
+                }
+                textStringBuilder.append("date of the change: $entry.key.createDate \n")
                 if(addedIds.size() > 0) {
                     textStringBuilder.append("added patients with ids: $addedIds \n")
                 }
                 if(removedIds.size() > 0) {
                     textStringBuilder.append("removed patients with ids: $removedIds \n")
                 }
+                i++
             }
             textStringBuilder.append(NEW_LINE)
             return textStringBuilder.toString()

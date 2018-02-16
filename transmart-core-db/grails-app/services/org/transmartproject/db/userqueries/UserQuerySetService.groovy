@@ -18,8 +18,8 @@ import org.transmartproject.core.exceptions.InvalidArgumentsException
 import org.transmartproject.core.userquery.SetType
 import org.transmartproject.core.userquery.SubscriptionFrequency
 import org.transmartproject.core.userquery.UserQuery
+import org.transmartproject.core.userquery.UserQuerySet
 import org.transmartproject.core.userquery.UserQuerySetDiff
-import org.transmartproject.core.userquery.UserQuerySetInstance
 import org.transmartproject.core.userquery.UserQuerySetResource
 import org.transmartproject.core.users.User
 import org.transmartproject.db.clinical.MultidimensionalDataResourceService
@@ -80,59 +80,28 @@ class UserQuerySetService implements UserQuerySetResource {
     }
 
     @Override
-    List<UserQuerySetInstance> getSetInstancesByQueryId(Long queryId, User currentUser, int firstResult, Integer numResults) {
+    List<UserQuerySet> getQuerySetsByQueryId(Long queryId, User currentUser, Integer maxNumberOfSets) {
 
         def session = sessionFactory.currentSession
-        Criteria criteria = session.createCriteria(UserQuerySetInstance, "querySetInstances")
-                .createAlias("querySetInstances.querySet", "querySet", JoinType.INNER_JOIN)
+        Criteria criteria = session.createCriteria(QuerySet, "querySet")
                 .createAlias("querySet.query", "query", JoinType.INNER_JOIN)
                 .add(Restrictions.eq('query.id', queryId))
                 .add(Restrictions.eq('query.deleted', false))
                 .addOrder(Order.desc('querySet.createDate'))
                 .setResultTransformer(Criteria.ALIAS_TO_ENTITY_MAP)
-                .setFirstResult(firstResult)
-        if(numResults) {
-            criteria.setMaxResults(numResults)
+        if(maxNumberOfSets) {
+            criteria.setMaxResults(maxNumberOfSets)
         }
         def result = criteria.list()
         if (!result) {
             return []
         }
 
-        DbUser user = (DbUser) usersResource.getUserFromUsername(currentUser.username)
-        if (!user.admin && result.query.first().username != currentUser.username) {
+        if (result.query.first().username != currentUser.username) {
             throw new AccessDeniedException("Query does not belong to the current user.")
         }
-        List<UserQuerySetInstance> querySetInstances = result.querySetInstances
-        return querySetInstances
-    }
-
-    @Override
-    List<UserQuerySetDiff> getDiffEntriesByQueryId(Long queryId, User currentUser, int firstResult, Integer numResults) {
-
-        def session = sessionFactory.currentSession
-        Criteria criteria = session.createCriteria(QuerySetDiff, "querySetDiffs")
-                .createAlias("querySetDiffs.querySet", "querySet", JoinType.INNER_JOIN)
-                .createAlias("querySet.query", "query", JoinType.INNER_JOIN)
-                .add(Restrictions.eq('query.id', queryId))
-                .add(Restrictions.eq('query.deleted', false))
-                .addOrder(Order.desc('querySet.createDate'))
-                .setResultTransformer(Criteria.ALIAS_TO_ENTITY_MAP)
-                .setFirstResult(firstResult)
-        if(numResults) {
-            criteria.setMaxResults(numResults)
-        }
-        def result = criteria.list()
-        if (!result) {
-            return []
-        }
-
-        DbUser user = (DbUser) usersResource.getUserFromUsername(currentUser.username)
-        if (!user.admin && result.query.first().username != currentUser.username) {
-            throw new AccessDeniedException("Query does not belong to the current user.")
-        }
-        List<UserQuerySetDiff> querySetDiffs = result.querySetDiffs
-        return querySetDiffs
+        List<UserQuerySet> querySet = result.querySet
+        return querySet
     }
 
     @Override
@@ -146,7 +115,6 @@ class UserQuerySetService implements UserQuerySetResource {
         }
         def session = sessionFactory.currentSession
         Criteria criteria = session.createCriteria(QuerySetDiff, "querySetDiffs")
-                .createAlias("querySetDiffs.querySet", "querySet", JoinType.INNER_JOIN)
                 .createAlias("querySet.query", "query", JoinType.INNER_JOIN)
                 .add(Restrictions.eq('query.username', username))
                 .add(Restrictions.eq('query.deleted', false))

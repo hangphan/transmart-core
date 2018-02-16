@@ -26,27 +26,27 @@ class UserQuerySetServiceSpec extends TransmartSpecification {
         sessionFactory.currentSession.flush()
     }
 
-    void "test fetching querySetInstances by a query id"() {
+    void "test fetching querySets by a query id"() {
         setupData()
 
         when:
         def user = userQueryTestData.user
-        def result = userQuerySetService.getSetInstancesByQueryId(userQueryTestData.queries[0].id, user, 0, 999)
+        def result = userQuerySetService.getQuerySetsByQueryId(userQueryTestData.queries[0].id, user, 999)
 
         then:
         result != null
 
         // check querySetInstances
-        result.size() == 2
-        result.containsAll(userQueryTestData.querySetInstances[0], userQueryTestData.querySetInstances[1])
+        result.size() == 1
+        result.querySetInstances.containsAll(userQueryTestData.querySetInstances[0], userQueryTestData.querySetInstances[1])
 
         // check querySets
-        (result.querySet as Set).size() == 1
-        result.querySet.containsAll(userQueryTestData.querySets[0])
+        (result as Set).size() == 2
+        result.containsAll(userQueryTestData.querySets[0])
 
         // check query
-        (result.querySet.query as Set).size() == 1
-        result.querySet.query.contains(userQueryTestData.queries[0])
+        (result.query as Set).size() == 1
+        result.query.contains(userQueryTestData.queries[0])
 
     }
 
@@ -64,22 +64,22 @@ class UserQuerySetServiceSpec extends TransmartSpecification {
 
         when:
         // user is not admin
-        user = userQueryTestData.adminUser
-        result = userQuerySetService.scan(user)
-        def createdDiffsForFirstQuery = userQuerySetService.getDiffEntriesByQueryId(userQueryTestData.queries[0].id,
-                user, 0, 999)
+        def adminUser = userQueryTestData.adminUser
+        result = userQuerySetService.scan(adminUser)
+        def createdSetsForFirstQuery = userQuerySetService.getQuerySetsByQueryId(userQueryTestData.queries[0].id,
+                user, 999)
 
         then:
         result != null
         //check query_set_diffs entries
         result == 2
-        createdDiffsForFirstQuery.size() == 4
-        createdDiffsForFirstQuery.findAll{it.changeFlag == ChangeFlag.ADDED.toString()}.size() == 3
-        createdDiffsForFirstQuery.findAll{it.changeFlag == ChangeFlag.REMOVED.toString()}.size() == 1
+        createdSetsForFirstQuery.size() == 4
+        createdSetsForFirstQuery.findAll { it.querySetDiffs.changeFlag == ChangeFlag.ADDED }.size() == 3
+        createdSetsForFirstQuery.findAll { it.changeFlag == ChangeFlag.REMOVED }.size() == 1
 
         //check number of added entries in total
         QuerySet.list().size() == userQueryTestData.querySets.size() + result //old set entries + entries created by scan
-        QuerySetDiff.list().size() == 2 * createdDiffsForFirstQuery.size()    //both sets are the same
+        QuerySetDiff.list().size() == 2 * createdSetsForFirstQuery.size()    //both sets are the same
     }
 
 }

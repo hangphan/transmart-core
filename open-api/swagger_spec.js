@@ -2374,7 +2374,7 @@ var spec = {
         }
       }
     },
-    "/v2/query_sets/{queryId}": {
+    "/v2/queries/{queryId}/sets": {
       "get": {
         "description": "Gets a list of sets created for the query and dependent on a data by query id.\n",
         "tags": [
@@ -2407,7 +2407,7 @@ var spec = {
         }
       }
     },
-    "/v2/query_sets/{queryId}/diffs": {
+    "/v2/queries/{queryId}/sets/diffs": {
       "get": {
         "description": "Gets a list of query result change entries by query id.\nHistory of data changes for specific query.\n",
         "tags": [
@@ -2440,7 +2440,7 @@ var spec = {
         }
       }
     },
-    "/v2/query_sets/scan": {
+    "/v2/queries/sets/scan": {
       "post": {
         "description": "Scans for changes in results of the stored user queries and updates stored sets.\nOnly for administrators.\n",
         "tags": [

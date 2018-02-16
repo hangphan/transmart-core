@@ -343,10 +343,9 @@ grails {
 /* }}} */
 
 /* {{{ Query subscription configuration */
-//Quartz plugin configuration - job for queryDiff subscription
-// To disable the email sending job, change this parameters to false
+// Quartz plugin configuration - job for query subscription
+// To disable the email sending job, change this to false
 quartz {
-    autoStartup = false
     jobEnabled = false
 }
 // max number of queryDiff results for pagination
