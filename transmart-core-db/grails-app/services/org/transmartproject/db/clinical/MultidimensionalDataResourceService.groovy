@@ -7,6 +7,7 @@ import com.google.common.collect.ImmutableSet
 import grails.orm.HibernateCriteriaBuilder
 import grails.transaction.Transactional
 import grails.util.Holders
+import groovy.transform.Canonical
 import groovy.transform.CompileStatic
 import groovy.transform.Memoized
 import groovy.transform.TupleConstructor
@@ -15,6 +16,7 @@ import org.hibernate.Criteria
 import org.hibernate.criterion.*
 import org.hibernate.internal.CriteriaImpl
 import org.hibernate.internal.StatelessSessionImpl
+import org.hibernate.transform.Transformers
 import org.hibernate.type.StandardBasicTypes
 import org.springframework.beans.factory.annotation.Autowired
 import org.transmartproject.core.IterableResult
@@ -27,6 +29,7 @@ import org.transmartproject.core.dataquery.highdim.projections.Projection
 import org.transmartproject.core.exceptions.EmptySetException
 import org.transmartproject.core.exceptions.InvalidArgumentsException
 import org.transmartproject.core.exceptions.NoSuchResourceException
+import org.transmartproject.core.exceptions.UnexpectedResultException
 import org.transmartproject.core.multidimquery.Dimension
 import org.transmartproject.core.multidimquery.Hypercube
 import org.transmartproject.core.multidimquery.MultiDimConstraint
@@ -36,7 +39,6 @@ import org.transmartproject.core.querytool.QueryResult
 import org.transmartproject.core.querytool.QueryResultType
 import org.transmartproject.core.querytool.QueryStatus
 import org.transmartproject.core.users.User
-import org.transmartproject.db.clinical.Query
 import org.transmartproject.db.dataquery.highdim.HighDimensionDataTypeResourceImpl
 import org.transmartproject.db.dataquery.highdim.HighDimensionResourceService
 import org.transmartproject.db.i2b2data.ObservationFact
@@ -45,10 +47,12 @@ import org.transmartproject.db.metadata.DimensionDescription
 import org.transmartproject.db.multidimquery.*
 import org.transmartproject.db.multidimquery.query.*
 import org.transmartproject.db.querytool.*
+import org.transmartproject.db.support.ParallelPatientSetTaskService
 import org.transmartproject.db.user.User as DbUser
 import org.transmartproject.db.util.HibernateUtils
 
 import static org.transmartproject.db.multidimquery.DimensionImpl.*
+import static org.transmartproject.db.support.ParallelPatientSetTaskService.*
 
 class MultidimensionalDataResourceService extends AbstractDataResourceService implements MultiDimensionalDataResource {
 
@@ -58,6 +62,8 @@ class MultidimensionalDataResourceService extends AbstractDataResourceService im
     @Autowired
     MDStudiesResource studiesResource
 
+    @Autowired
+    ParallelPatientSetTaskService parallelPatientSetTaskService
 
     @Override Dimension getDimension(String name) {
         def dimension = getBuiltinDimension(name)
@@ -332,6 +338,27 @@ class MultidimensionalDataResourceService extends AbstractDataResourceService im
     }
 
     /**
+     * Find a query result based on a constraint.
+     * @param user the creator of the query result.
+     * @param constraint the constraint used in the lookup.
+     * @param queryResultType
+     * @return the query result if it exists; null otherwise.
+     */
+    QueryResult findQueryResultByConstraint(User user,
+                                            MultiDimConstraint constraint,
+                                            QtQueryResultType queryResultType) {
+        def criteria = DetachedCriteria.forClass(QtQueryResultInstance.class, 'qri')
+                .createCriteria('qri.queryInstance', 'qi')
+                .createCriteria('qi.queryMaster', 'qm')
+                .add(Restrictions.eq('qri.queryResultType', queryResultType))
+                .add(Restrictions.eq('qri.statusTypeId', (short)QueryStatus.FINISHED.id))
+                .add(Restrictions.eq('qi.userId', user.username))
+                .add(Restrictions.eq('qm.requestConstraints', constraint.toJson()))
+                .addOrder(Order.desc('qri.endDate'))
+        (QueryResult)getFirst(criteria)
+    }
+
+    /**
      * Tries to reuse query result that satisfy provided constraint for the user before creating it.
      * @return A new one or reused query result.
      */
@@ -342,16 +369,12 @@ class MultidimensionalDataResourceService extends AbstractDataResourceService im
                                              QtQueryResultType queryResultType,
                                              Closure<Long> queryExecutor) {
 
-        def criteria = DetachedCriteria.forClass(QtQueryResultInstance.class, 'qri')
-                .createCriteria('qri.queryInstance', 'qi')
-                .createCriteria('qi.queryMaster', 'qm')
-                .add(Restrictions.eq('qri.queryResultType', queryResultType))
-                .add(Restrictions.eq('qri.statusTypeId', (short)QueryStatus.FINISHED.id))
-                .add(Restrictions.eq('qi.userId', user.username))
-                .add(Restrictions.eq('qm.requestConstraints', constraint.toJson()))
-                .addOrder(Order.desc('qri.endDate'))
-
-        (QueryResult)getFirst(criteria) ?: createQueryResult(name, user, constraint, apiVersion, queryResultType, queryExecutor)
+        QueryResult result = findQueryResultByConstraint(user, constraint, queryResultType) ?:
+                createQueryResult(name, user, constraint, apiVersion, queryResultType, queryExecutor)
+        if (result.status != QueryStatus.FINISHED) {
+            throw new UnexpectedResultException('Query not finished.')
+        }
+        result
     }
 
     /**
@@ -405,27 +428,92 @@ class MultidimensionalDataResourceService extends AbstractDataResourceService im
         )
     }
 
+    @Canonical
+    @CompileStatic
+    static class PatientIdListWrapper {
+        List<Long> patientIds
+    }
+
+    @CompileStatic
+    private List<PatientIdListWrapper> getPatientIdsTask(SubtaskParameters parameters) {
+        def session = (StatelessSessionImpl) sessionFactory.openStatelessSession()
+        try {
+            session.connection().autoCommit = false
+            HibernateCriteriaBuilder q = HibernateUtils.createCriteriaBuilder(ObservationFact, 'observation_fact', session)
+            CriteriaImpl criteria = (CriteriaImpl) q.instance
+
+            HibernateCriteriaQueryBuilder builder = getCheckedQueryBuilder(parameters.user)
+
+            criteria.add(HibernateCriteriaQueryBuilder.defaultModifierCriterion)
+            criteria.setProjection(Projections.projectionList().add(
+                    Projections.distinct(Projections.property('patient.id')), 'patientId'))
+            criteria.setResultTransformer(Transformers.ALIAS_TO_ENTITY_MAP)
+            builder.applyToCriteria(criteria, [parameters.constraint])
+            def result = criteria.list().collect { it -> (Long)((Map)it).patientId } as List<Long>
+            return [new PatientIdListWrapper(result)]
+        } finally {
+            session.close()
+        }
+    }
+
     /**
-     * Populates given query result with patient set that satisfy provided constaints with regards with user access rights.
+     * Populates given query result with patient set that satisfy provided constraints with regards with user access rights.
      * @param queryResult query result to populate with patients
      * @param constraint constraint to get results that satisfy it
      * @param user user for whom to execute the patient set query. Result will depend on the user access rights.
      * @return Number of patients inserted in the patient set
      */
+    @CompileStatic
     private Integer populatePatientSetQueryResult(QtQueryResultInstance queryResult, MultiDimConstraint constraint, User user) {
         assert queryResult
         assert queryResult.id
 
-        DetachedCriteria patientSetDetachedCriteria = getCheckedQueryBuilder(user).buildCriteria(constraint)
-                .setProjection(
-                Projections.projectionList()
-                        .add(Projections.distinct(Projections.property('patient.id')), 'pid')
-                        .add(Projections.sqlProjection("${queryResult.id} as rid", ['rid'] as String[],
-                        [StandardBasicTypes.LONG] as org.hibernate.type.Type[])))
+        QueryResult allPatientsResult = constraint instanceof TrueConstraint ? null :
+                findQueryResultByConstraint(user, new TrueConstraint(), patientSetResultType)
+        if (!allPatientsResult) {
+            // no patient set found for all patients, execute single query
+            DetachedCriteria patientSetDetachedCriteria = getCheckedQueryBuilder(user).buildCriteria(constraint)
+                    .setProjection(
+                    Projections.projectionList()
+                            .add(Projections.distinct(Projections.property('patient.id')), 'pid')
+                            .add(Projections.sqlProjection("${queryResult.id} as rid", ['rid'] as String[],
+                            [StandardBasicTypes.LONG] as org.hibernate.type.Type[])))
 
-        Criteria patientSetCriteria = getExecutableCriteria(patientSetDetachedCriteria)
-        return HibernateUtils
-                .insertResultToTable(QtPatientSetCollection, ['patient.id', 'resultInstance.id'], patientSetCriteria)
+            Criteria patientSetCriteria = getExecutableCriteria(patientSetDetachedCriteria)
+            return HibernateUtils
+                    .insertResultToTable(QtPatientSetCollection, ['patient.id', 'resultInstance.id'], patientSetCriteria)
+        } else {
+            // parallelise based on allPatientsResult
+            def t1 = new Date()
+            log.info "Start patient set creation ..."
+            def combinedConstraint = new AndConstraint([new PatientSetConstraint(allPatientsResult.id), (Constraint)constraint])
+            def taskParameters = new TaskParameters(combinedConstraint, user)
+            List<Long> patientIds = parallelPatientSetTaskService.run(
+                    taskParameters,
+                    { SubtaskParameters params ->
+                        getPatientIdsTask(params)
+                    },
+                    { List<PatientIdListWrapper> patientIdLists ->
+                        patientIdLists.collectMany { it.patientIds } as List<Long>
+                    }
+            )
+            def t2 = new Date()
+            log.info "Fetched ${patientIds.size()} patients (took ${t2.time - t1.time} ms.)."
+            def session = sessionFactory.openStatelessSession()
+            def tx = session.beginTransaction()
+            int insertCount = 0
+            for (Long patientId: patientIds) {
+                insertCount += session.createQuery(
+                        'insert into QtPatientSetCollection (patient, resultInstance) values (:patientId, :resultInstanceId)')
+                        .setParameter('patientId', patientId)
+                        .setParameter('resultInstanceId', queryResult.id)
+                        .executeUpdate()
+            }
+            tx.commit()
+            def t3 = new Date()
+            log.info "Patient set inserted (took ${t3.time - t2.time} ms.)."
+            insertCount
+        }
     }
 
     @Override
